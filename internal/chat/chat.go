@@ -71,10 +71,18 @@ func (c *Chat) processEvent(eventMsg []byte) error {
 		} else {
 			return fmt.Errorf("chat are unknown")
 		}
+
+		var userName string
+		for _, user := range c.Chats[msg.ChatId].Users {
+			if user.Id == msg.UserId {
+				userName = user.Login
+			}
+		}
+
 		if c.state != "inChat" || c.currentChat != msg.ChatId {
 			fmt.Print("\nSome message recived\n>")
 		} else {
-			fmt.Printf("%d:%s>%s\n", msg.UserId, msg.PostedAt.Format("2 Jan 2006 15:04"), msg.Message)
+			fmt.Printf("%s:%s>%s\n", userName, msg.PostedAt.Format("2 Jan 2006 15:04"), msg.Message)
 		}
 	case 3:
 		msg, err := deserializeMessageReadAt(eventMsg)
@@ -153,7 +161,7 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 	command := strings.Split(input, " ")
 
 	switch command[0] {
-	case "auth":
+	case "auth", "a":
 		c.mxConn.RLock()
 
 		if c.conn != nil {
@@ -169,6 +177,7 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 		if c.state != "start" {
 			return fmt.Errorf("alrady login")
 		}
+		c.state = "auth"
 
 		return c.auth(command[1], command[2], ctx)
 	case "register":
@@ -188,8 +197,9 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 			return fmt.Errorf("alrady auth")
 		}
 
+		c.state = "auth"
 		return c.register(command[1], command[2], ctx)
-	case "chatlist":
+	case "chatlist", "cl":
 		if c.state == "start" {
 			return fmt.Errorf("do not auth")
 		}
@@ -201,7 +211,7 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 		}
 		c.mxChats.RUnlock()
 
-	case "opencchat":
+	case "opencchat", "oc":
 		if c.state == "start" {
 			return fmt.Errorf("do not auth")
 		}
@@ -225,26 +235,29 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 
 		c.mxChats.RUnlock()
 		for _, msg := range chat.Messages {
-			fmt.Printf("%d:%s>%s\n", msg.UserId, msg.PostedAt.Format("2 Jan 2006 15:04"), msg.Message)
+			var userName string
+			for _, user := range c.Chats[c.currentChat].Users {
+				if user.Id == msg.UserId {
+					userName = user.Login
+				}
+			}
+
+			fmt.Printf("%s:%s>%s\n", userName, msg.PostedAt.Format("2 Jan 2006 15:04"), msg.Message)
 		}
-	case "send":
+	case "send", "s":
 		c.mxConn.RLock()
 
-		if c.conn != nil {
+		if c.conn == nil {
 			c.mxConn.RUnlock()
-			return fmt.Errorf("alrady auth")
+			return fmt.Errorf("not auth")
 		}
 		c.mxConn.RUnlock()
 
-		if len(command) != 3 {
-			return fmt.Errorf("broken command")
+		if c.state != "inChat" {
+			return fmt.Errorf("not in chat")
 		}
 
-		if c.state != "start" {
-			return fmt.Errorf("alrady auth")
-		}
-
-		return c.register(command[1], command[2], ctx)
+		return c.sendMessage(strings.Join(command[1:], ""))
 	default:
 		return fmt.Errorf("unknown command")
 	}
@@ -335,4 +348,22 @@ func (c *Chat) register(login, pass string, ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (c *Chat) sendMessage(message string) error {
+	c.mxConn.RLock()
+	defer c.mxConn.RUnlock()
+
+	msg, err := serializeTextMessage(MessageModel{
+		ChatId:  c.currentChat,
+		Message: message,
+		IsFile:  false,
+	})
+
+	if err != nil {
+		return err
+	}
+
+	_, err = c.conn.Write(msg)
+	return err
 }
