@@ -1,0 +1,11 @@
+{
+    "log_level": "debug",
+    "api": {
+      "host": "localhost",
+      "tcp_port": ":8000",
+      "http_port": ":8080",
+      "read_timeout": 30,
+      "write_timeout": 30,
+      "idle_timeout": 30
+    }
+  }
