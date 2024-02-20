@@ -58,7 +58,13 @@ func (c *Chat) processEvent(eventMsg []byte) error {
 		}
 
 		for _, chat := range chats {
-			c.Chats[chat.Id] = &chat
+			c.Chats[chat.Id] = &ChatModel{
+				Id:          chat.Id,
+				LastMessage: chat.LastMessage,
+				Name:        chat.Name,
+				Users:       chat.Users,
+				Messages:    chat.Messages,
+			}
 		}
 		fmt.Print("\nChats recived\n>")
 	case 2:
@@ -257,7 +263,7 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 			return fmt.Errorf("not in chat")
 		}
 
-		return c.sendMessage(strings.Join(command[1:], ""))
+		return c.sendMessage(strings.Join(command[1:], " "))
 	default:
 		return fmt.Errorf("unknown command")
 	}
