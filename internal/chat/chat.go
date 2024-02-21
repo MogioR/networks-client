@@ -282,15 +282,19 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 			return fmt.Errorf("not in chat")
 		}
 
-		event := events.SendTextEvent{
-			ChatId:  c.currentChat,
-			Message: strings.Join(command[1:], " "),
-		}
+		return c.sendMessage(strings.Join(command[1:], ""))
+	default:
+		return fmt.Errorf("unknown command")
+	}
+	return nil
+}
 
-		c.mxConn.RLock()
-		_, err := c.conn.Write(event.Serialize().Bytes())
-		c.mxConn.RUnlock()
+func (c *Chat) auth(login, pass string, ctx context.Context) error {
+	url := `http://` + c.cfg.Api.Host + c.cfg.Api.HTTPPort + `/api/v1/auth`
+	params := []byte(fmt.Sprintf(`{"login": "%s","pass": "%s"}`, login, pass))
 
+	token, err := utills.Post(&c.client, url, params, map[string]string{})
+	if err != nil {
 		return err
 	case "sendfile", "sf":
 		if !c.isAuth {
