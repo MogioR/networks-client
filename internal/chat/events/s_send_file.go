@@ -1,0 +1,30 @@
+package events
+
+import (
+	"bytes"
+	"encoding/binary"
+)
+
+type SendFileToChatEvent struct {
+	FileName string
+	FileSize int32
+}
+
+func (c *SendFileToChatEvent) Deserialize(buf *bytes.Buffer) error {
+	var messageLength uint16
+	if err := binary.Read(buf, binary.BigEndian, &messageLength); err != nil {
+		return err
+	}
+
+	messageBytes := make([]byte, messageLength)
+	if _, err := buf.Read(messageBytes); err != nil {
+		return err
+	}
+	c.FileName = string(messageBytes)
+
+	if err := binary.Read(buf, binary.BigEndian, &c.FileSize); err != nil {
+		return err
+	}
+
+	return nil
+}

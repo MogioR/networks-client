@@ -33,14 +33,15 @@ func main() {
 	}
 	logger.SetLevel(loglevel)
 
-	c := chat.NewChat(cfg)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	errChan := make(chan error, 1)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	go c.Update(ctx)
+	for i := 0; i < 10000; i++ {
+		c := chat.NewChat(cfg)
+		go c.ClientHeandler(ctx, i)
+	}
 
 	select {
 	case sig := <-sigChan:

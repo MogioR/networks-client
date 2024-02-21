@@ -2,141 +2,163 @@ package chat
 
 import (
 	"bufio"
+	"bytes"
+	"client/internal/chat/events"
 	"client/internal/config"
-	"client/internal/utills"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/valyala/fasthttp"
+	log "github.com/sirupsen/logrus"
 )
 
 type Chat struct {
-	Chats  map[int64]*ChatModel
-	conn   net.Conn
-	client fasthttp.Client
-	cfg    *config.Config
+	Users map[int64]string
+	Chats map[int64]*events.Chat
+	conn  net.Conn
+
+	cfg *config.Config
 
 	mxChats sync.RWMutex
 	mxConn  sync.RWMutex
 
-	state       string
+	isAuth      bool
 	currentChat int64
 }
 
 func NewChat(cfg *config.Config) *Chat {
 	return &Chat{
-		Chats: make(map[int64]*ChatModel, 0),
-		client: fasthttp.Client{
-			MaxResponseBodySize: 90 * 1024 * 1024,
-			ReadTimeout:         time.Duration(30 * time.Second),
-			WriteTimeout:        time.Duration(30 * time.Second),
-			MaxConnWaitTimeout:  time.Duration(30 * time.Second),
-		},
+		Chats: make(map[int64]*events.Chat, 0),
+		Users: make(map[int64]string, 0),
+
 		cfg:         cfg,
-		state:       "start",
+		isAuth:      false,
 		currentChat: -1,
 	}
 }
 
-func (c *Chat) processEvent(eventMsg []byte) error {
+func (c *Chat) processEvent(eventMsg *bytes.Buffer) error {
 	c.mxChats.Lock()
 	defer c.mxChats.Unlock()
 
-	var err error
-	switch eventMsg[0] {
-	case 1:
-		var chats []ChatModel
-		chats, err = deserializeChats(eventMsg)
+	var command int8
+	err := binary.Read(eventMsg, binary.BigEndian, &command)
+	if err != nil {
+		return err
+	}
+	switch command {
+	case -1:
+		event := events.SystemMessageEvent{}
+		err := event.Deserialize(eventMsg)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Info: System message: %s\n> ", event.Message)
+	case -2:
+		event := events.ChatEvent{}
+		err := event.Deserialize(eventMsg)
 		if err != nil {
 			return err
 		}
 
-		for _, chat := range chats {
-			c.Chats[chat.Id] = &chat
+		for _, chat := range event.Chats {
+			c.Chats[chat.ChatId] = chat
+			for _, user := range chat.Users {
+				c.Users[user.Id] = user.Login
+			}
 		}
-		fmt.Print("\nChats recived\n>")
-	case 2:
-		msg, err := deserializeMessage(eventMsg)
+		fmt.Printf("Info: Chats info updated\n> ")
+	case -3:
+		fmt.Printf("Chat users updated\n> ")
+	case -4:
+		event := events.NewMessageEvent{}
+		err := event.Deserialize(eventMsg)
 		if err != nil {
 			return err
 		}
-		if _, ok := c.Chats[msg.ChatId]; ok {
-			c.Chats[msg.ChatId].Messages = append(c.Chats[msg.ChatId].Messages, msg)
+
+		if _, ok := c.Chats[event.ChatId]; !ok {
+			return fmt.Errorf("unknown chat")
+		}
+
+		var isFileByte byte
+		if event.MessageType {
+			isFileByte = 1
+		}
+
+		c.Chats[event.ChatId].Messages = append(c.Chats[event.ChatId].Messages,
+			events.Message{
+				Id:          event.MessageId,
+				SenderId:    event.UserId,
+				MessageType: isFileByte,
+				Message:     event.Message,
+				SendTime:    event.SendTime,
+				ReadTime:    event.ReadTime,
+			})
+
+		if c.currentChat == event.ChatId {
+			fmt.Printf(
+				"%s:%s> %s\n> ",
+				c.Users[event.UserId],
+				event.SendTime.Format("2006-01-02"),
+				event.Message,
+			)
 		} else {
-			return fmt.Errorf("chat are unknown")
+			fmt.Printf("New message in chat\n> ")
 		}
+	case -5:
+		fmt.Printf("Some one read message in chat\n> ")
+	case -6:
+		event := events.SendFileToChatEvent{}
+		err := event.Deserialize(eventMsg)
+		if err != nil {
+			return err
+		}
+		file := make([]byte, event.FileSize)
 
-		var userName string
-		for _, user := range c.Chats[msg.ChatId].Users {
-			if user.Id == msg.UserId {
-				userName = user.Login
+		for i := 0; i < len(file); i += 1000 {
+			top := i + 1000
+			if top > len(file) {
+				top = len(file)
+			}
+			c.mxConn.RLock()
+			_, err = c.conn.Read(file[i:top])
+			c.mxConn.RUnlock()
+			if err != nil {
+				return err
 			}
 		}
 
-		if c.state != "inChat" || c.currentChat != msg.ChatId {
-			fmt.Print("\nSome message recived\n>")
-		} else {
-			fmt.Printf("%s:%s>%s\n", userName, msg.PostedAt.Format("2 Jan 2006 15:04"), msg.Message)
-		}
-	case 3:
-		msg, err := deserializeMessageReadAt(eventMsg)
+		err = SaveBytesToFile(fmt.Sprintf("downloads/%s", event.FileName), file)
 		if err != nil {
 			return err
 		}
-		if _, ok := c.Chats[msg.ChatId]; ok {
-			for i := range c.Chats[msg.ChatId].Messages {
-				if c.Chats[msg.ChatId].Messages[i].Id == msg.Id {
-					c.Chats[msg.ChatId].Messages[i].ReadedAt = msg.ReadedAt
-				}
-			}
-		} else {
-			return fmt.Errorf("chat are unknown")
-		}
-		fmt.Print("\nSome message readed\n>")
 
-	case 4:
-		msg, err := deserializeChat(eventMsg)
-		if err != nil {
-			return err
-		}
-		if _, ok := c.Chats[msg.Id]; !ok {
-			c.Chats[msg.Id] = msg
-		} else {
-			return fmt.Errorf("chat are known")
-		}
-		fmt.Print("\nNew chat invited\n>")
-	case 5:
-		msg, err := deserializeChangeChatMembers(eventMsg)
-		if err != nil {
-			return err
-		}
-		if _, ok := c.Chats[msg.Id]; ok {
-			c.Chats[msg.Id].Users = msg.Users
-		} else {
-			return fmt.Errorf("chat are unknown")
-		}
-		fmt.Print("\nChat changes members\n>")
 	default:
 		return fmt.Errorf("unknown event type")
 	}
-
-	return err
+	return nil
 }
 
-func (c *Chat) Update(ctx context.Context) {
+func (c *Chat) ClientHeandler(ctx context.Context, i int) {
+	err := c.prosessCommand(fmt.Sprintf("r user3_%d admin", i), ctx)
+	if err != nil {
+		fmt.Println(err)
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
 	go func() {
-	loop:
 		for {
 			select {
 			case <-ctx.Done():
-				break loop
+				return
 			default:
 			}
 
@@ -153,66 +175,75 @@ func (c *Chat) Update(ctx context.Context) {
 	}()
 
 	<-ctx.Done()
-	return
+}
 
+func (c *Chat) serverHeandler(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		response := make([]byte, 1024)
+		n, err := c.conn.Read(response)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		buf := bytes.NewBuffer(response[:n])
+		c.processEvent(buf)
+	}
 }
 
 func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 	command := strings.Split(input, " ")
 
 	switch command[0] {
-	case "auth", "a":
+	case "login", "l":
 		c.mxConn.RLock()
-
 		if c.conn != nil {
 			c.mxConn.RUnlock()
 			return fmt.Errorf("alrady auth")
 		}
 		c.mxConn.RUnlock()
-
 		if len(command) != 3 {
 			return fmt.Errorf("broken command")
 		}
 
-		if c.state != "start" {
-			return fmt.Errorf("alrady login")
-		}
-		c.state = "auth"
-
-		return c.auth(command[1], command[2], ctx)
-	case "register":
+		return c.auth(ctx, command[1], command[2], false)
+	case "register", "r":
 		c.mxConn.RLock()
-
 		if c.conn != nil {
 			c.mxConn.RUnlock()
 			return fmt.Errorf("alrady auth")
 		}
 		c.mxConn.RUnlock()
-
 		if len(command) != 3 {
 			return fmt.Errorf("broken command")
 		}
+		return c.auth(ctx, command[1], command[2], true)
 
-		if c.state != "start" {
-			return fmt.Errorf("alrady auth")
-		}
-
-		c.state = "auth"
-		return c.register(command[1], command[2], ctx)
 	case "chatlist", "cl":
-		if c.state == "start" {
+		if !c.isAuth {
 			return fmt.Errorf("do not auth")
 		}
 
 		c.mxChats.RLock()
+		c.currentChat = -1
 		fmt.Println("№\tName\tUsersCount\tLast Message")
 		for i, chat := range c.Chats {
-			fmt.Printf("%d\t%s\t%d\t\t%s\n", i, chat.Name, len(chat.Users), chat.LastMessage.Format("2 Jan 2006 15:04"))
+			lastMessage := ""
+			if len(chat.Messages) > 0 {
+				lastMessage = chat.Messages[len(chat.Messages)-1].SendTime.Format("2 Jan 2006 15:04")
+			}
+
+			fmt.Printf("%d\t%s\t%d\t\t%s\n", i, chat.ChatName, len(chat.Users), lastMessage)
 		}
 		c.mxChats.RUnlock()
+		return nil
 
 	case "opencchat", "oc":
-		if c.state == "start" {
+		if !c.isAuth {
 			return fmt.Errorf("do not auth")
 		}
 		if len(command) != 2 {
@@ -225,60 +256,131 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 		}
 		c.mxChats.RLock()
 
-		var chat *ChatModel
+		var chat *events.Chat
 		var ok bool
 		if chat, ok = c.Chats[charId]; !ok {
 			return fmt.Errorf("unknown chat")
 		}
-		c.state = "inChat"
-		c.currentChat = chat.Id
+		c.currentChat = chat.ChatId
 
-		c.mxChats.RUnlock()
 		for _, msg := range chat.Messages {
-			var userName string
-			for _, user := range c.Chats[c.currentChat].Users {
-				if user.Id == msg.UserId {
-					userName = user.Login
-				}
+			if msg.MessageType == 0 {
+				fmt.Printf("%s:%s>%s\n", c.Users[msg.SenderId], msg.SendTime.Format("2 Jan 2006 15:04"), msg.Message)
+			} else {
+				fmt.Printf("%s:%s>%s [%d]\n", c.Users[msg.SenderId], msg.SendTime.Format("2 Jan 2006 15:04"), msg.Message, msg.Id)
 			}
 
-			fmt.Printf("%s:%s>%s\n", userName, msg.PostedAt.Format("2 Jan 2006 15:04"), msg.Message)
 		}
-	case "send", "s":
-		c.mxConn.RLock()
+		c.mxChats.RUnlock()
+		return nil
 
-		if c.conn == nil {
-			c.mxConn.RUnlock()
+	case "sendtext", "st":
+		if !c.isAuth {
 			return fmt.Errorf("not auth")
 		}
-		c.mxConn.RUnlock()
-
-		if c.state != "inChat" {
+		if c.currentChat == -1 {
 			return fmt.Errorf("not in chat")
 		}
 
-		return c.sendMessage(strings.Join(command[1:], ""))
+		event := events.SendTextEvent{
+			ChatId:  c.currentChat,
+			Message: strings.Join(command[1:], " "),
+		}
+
+		c.mxConn.RLock()
+		_, err := c.conn.Write(event.Serialize().Bytes())
+		c.mxConn.RUnlock()
+
+		return err
+	case "sendfile", "sf":
+		if !c.isAuth {
+			return fmt.Errorf("not auth")
+		}
+		if c.currentChat == -1 {
+			return fmt.Errorf("not in chat")
+		}
+
+		file, err := ReadFileToBytes(command[1])
+		if err != nil {
+			return err
+		}
+
+		event := events.SendFileInitEvent{
+			ChatId:   c.currentChat,
+			FileName: filepath.Base(command[1]),
+			FileSize: int32(len(file)),
+		}
+
+		c.mxConn.RLock()
+		_, err = c.conn.Write(event.Serialize().Bytes())
+		c.mxConn.RUnlock()
+		if err != nil {
+			return err
+		}
+
+		for i := 0; i < len(file); i += 1000 {
+			top := i + 1000
+			if top > len(file) {
+				top = len(file)
+			}
+			c.mxConn.RLock()
+			_, err = c.conn.Write(file[i:top])
+			c.mxConn.RUnlock()
+			if err != nil {
+				return err
+			}
+		}
+		return err
+
+	case "downloadfile", "df":
+		if !c.isAuth {
+			return fmt.Errorf("not auth")
+		}
+		if c.currentChat == -1 {
+			return fmt.Errorf("not in chat")
+		}
+		var err error
+		var messageId int64
+		if messageId, err = strconv.ParseInt(command[1], 10, 64); err != nil {
+			return err
+		}
+
+		event := events.GetFileFromChatEvent{
+			MessageId: messageId,
+			ChatId:    c.currentChat,
+		}
+		c.mxConn.RLock()
+		_, err = c.conn.Write(event.Serialize().Bytes())
+		c.mxConn.RUnlock()
+
+		return err
+
 	default:
 		return fmt.Errorf("unknown command")
 	}
-	return nil
 }
 
-func (c *Chat) auth(login, pass string, ctx context.Context) error {
-	url := `http://` + c.cfg.Api.Host + c.cfg.Api.HTTPPort + `/api/v1/auth`
-	params := []byte(fmt.Sprintf(`{"login": "%s","pass": "%s"}`, login, pass))
-
-	token, err := utills.Post(&c.client, url, params, map[string]string{})
-	if err != nil {
-		return err
-	}
-
+func (c *Chat) auth(ctx context.Context, login, password string, isRegister bool) error {
 	conn, err := net.Dial("tcp", c.cfg.Api.Host+c.cfg.Api.TCPPort)
 	if err != nil {
 		return err
 	}
 
-	_, err = conn.Write(token)
+	var event events.ClientEvent
+	if isRegister {
+		event = &events.RegisterEvent{
+			Login:    login,
+			Password: password,
+		}
+	} else {
+		event = &events.LoginEvent{
+			Login:    login,
+			Password: password,
+		}
+	}
+
+	msg := event.Serialize().Bytes()
+	_, err = conn.Write(msg)
 	if err != nil {
 		return err
 	}
@@ -287,83 +389,28 @@ func (c *Chat) auth(login, pass string, ctx context.Context) error {
 	c.conn = conn
 	c.mxConn.Unlock()
 
-	go func() { // Получение ответа от сервера
-	loop:
-		for {
-			select {
-			case <-ctx.Done():
-				break loop
-			default:
-			}
-			response := make([]byte, 1024)
-			n, err := c.conn.Read(response)
-			if err != nil {
-				continue
-			}
-			c.processEvent(response[:n])
-		}
-	}()
+	c.isAuth = true
+
+	go c.serverHeandler(ctx)
 
 	return nil
 }
 
-func (c *Chat) register(login, pass string, ctx context.Context) error {
-	url := `http://` + c.cfg.Api.Host + c.cfg.Api.HTTPPort + `/api/v1/register`
-	params := []byte(fmt.Sprintf(`{"login": "%s","pass": "%s"}`, login, pass))
-
-	token, err := utills.Post(&c.client, url, params, map[string]string{})
+func ReadFileToBytes(filePath string) ([]byte, error) {
+	// Читаем содержимое файла в байтовый массив
+	content, err := ioutil.ReadFile(filePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	conn, err := net.Dial("tcp", c.cfg.Api.Host+c.cfg.Api.TCPPort)
-	if err != nil {
-		return err
-	}
-
-	_, err = conn.Write(token)
-	if err != nil {
-		return err
-	}
-
-	c.mxConn.Lock()
-	c.conn = conn
-	c.mxConn.Unlock()
-
-	go func() { // Получение ответа от сервера
-	loop:
-		for {
-			select {
-			case <-ctx.Done():
-				break loop
-			default:
-			}
-			response := make([]byte, 1024)
-			n, err := c.conn.Read(response)
-			if err != nil {
-				continue
-			}
-			c.processEvent(response[:n])
-		}
-	}()
-
-	return nil
+	return content, nil
 }
 
-func (c *Chat) sendMessage(message string) error {
-	c.mxConn.RLock()
-	defer c.mxConn.RUnlock()
-
-	msg, err := serializeTextMessage(MessageModel{
-		ChatId:  c.currentChat,
-		Message: message,
-		IsFile:  false,
-	})
-
+func SaveBytesToFile(filename string, data []byte) error {
+	// Используем функцию ioutil.WriteFile для записи данных в файл
+	err := ioutil.WriteFile(filename, data, 0644)
 	if err != nil {
 		return err
 	}
-
-	_, err = c.conn.Write(msg)
-	return err
+	return nil
 }
