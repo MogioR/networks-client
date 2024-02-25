@@ -6,8 +6,8 @@ import (
 )
 
 type KickFromChatEvent struct {
-	chatId int64
-	user   string
+	ChatId int64
+	User   string
 }
 
 func (e *KickFromChatEvent) Serialize() *bytes.Buffer {
@@ -15,10 +15,10 @@ func (e *KickFromChatEvent) Serialize() *bytes.Buffer {
 
 	buf.WriteByte(6)
 
-	binary.Write(buf, binary.BigEndian, e.chatId)
+	binary.Write(buf, binary.BigEndian, e.ChatId)
 
-	buf.WriteByte(byte(len(e.user)))
-	buf.WriteString(e.user)
+	buf.WriteByte(byte(len(e.User)))
+	buf.WriteString(e.User)
 
 	return buf
 }

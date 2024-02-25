@@ -355,6 +355,78 @@ func (c *Chat) prosessCommand(input string, ctx context.Context) error {
 
 		return err
 
+	case "createchat", "cc":
+		if !c.isAuth {
+			return fmt.Errorf("not auth")
+		}
+		var err error
+		event := events.CreateChatEvent{
+			ChatName:    command[1],
+			InviteUsers: command[1:],
+		}
+		c.mxConn.RLock()
+		_, err = c.conn.Write(event.Serialize().Bytes())
+		c.mxConn.RUnlock()
+
+		return err
+
+	case "invite", "iu":
+		if !c.isAuth {
+			return fmt.Errorf("not auth")
+		}
+		if c.currentChat == -1 {
+			return fmt.Errorf("not in chat")
+		}
+		var err error
+
+		event := events.InviteToChatEvent{
+			User:   command[1],
+			ChatId: c.currentChat,
+		}
+		c.mxConn.RLock()
+		_, err = c.conn.Write(event.Serialize().Bytes())
+		c.mxConn.RUnlock()
+
+		return err
+	case "kick", "ku":
+		if !c.isAuth {
+			return fmt.Errorf("not auth")
+		}
+		if c.currentChat == -1 {
+			return fmt.Errorf("not in chat")
+		}
+		var err error
+
+		event := events.KickFromChatEvent{
+			User:   command[1],
+			ChatId: c.currentChat,
+		}
+		c.mxConn.RLock()
+		_, err = c.conn.Write(event.Serialize().Bytes())
+		c.mxConn.RUnlock()
+		return err
+
+	case "readmessage", "rm":
+		if !c.isAuth {
+			return fmt.Errorf("not auth")
+		}
+		if c.currentChat == -1 {
+			return fmt.Errorf("not in chat")
+		}
+		var err error
+		var messageId int64
+		if messageId, err = strconv.ParseInt(command[1], 10, 64); err != nil {
+			return err
+		}
+		event := events.ReadMessageEvent{
+			MessageId: messageId,
+			ChatId:    c.currentChat,
+		}
+		c.mxConn.RLock()
+		_, err = c.conn.Write(event.Serialize().Bytes())
+		c.mxConn.RUnlock()
+
+		return err
 	default:
 		return fmt.Errorf("unknown command")
 	}

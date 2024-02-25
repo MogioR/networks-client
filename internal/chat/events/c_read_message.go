@@ -6,8 +6,8 @@ import (
 )
 
 type ReadMessageEvent struct {
-	chatId    int64
-	messageId int64
+	ChatId    int64
+	MessageId int64
 }
 
 func (e *ReadMessageEvent) Serialize() *bytes.Buffer {
@@ -15,8 +15,8 @@ func (e *ReadMessageEvent) Serialize() *bytes.Buffer {
 
 	buf.WriteByte(14)
 
-	binary.Write(buf, binary.BigEndian, e.chatId)
-	binary.Write(buf, binary.BigEndian, e.messageId)
+	binary.Write(buf, binary.BigEndian, e.ChatId)
+	binary.Write(buf, binary.BigEndian, e.MessageId)
 
 	return buf
 }
